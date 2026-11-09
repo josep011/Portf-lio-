@@ -51,6 +51,9 @@ section{scroll-margin-top:88px}
 .nav ul{display:flex;gap:4px;list-style:none;margin:0;padding:0}
 .nav a.link{display:block;padding:8px 14px;border-radius:999px;text-decoration:none;font-size:14px;color:var(--muted);transition:color .3s,background .3s}
 .nav a.link:hover{color:var(--ink);background:rgba(255,255,255,.6)}
+.nav-right{display:flex;align-items:center;gap:6px}
+.nav-edit{display:flex;align-items:center;gap:6px;height:36px;padding:0 14px;border-radius:999px;border:0;background:var(--ink);color:#fff;font-size:13.5px}
+.nav-edit svg{width:15px;height:15px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .swap{display:flex;align-items:center;gap:10px;border:0;background:none;padding:4px 6px 4px 10px;border-radius:999px;font-size:13px;color:var(--muted)}
 .swap .track{position:relative;width:52px;height:30px;border-radius:999px;border:1.5px solid var(--accent-soft);background:color-mix(in srgb,#fff 55%,transparent);transition:border-color .6s}
 .swap .knob{position:absolute;top:2px;left:2px;width:23px;height:23px;border-radius:50%;background:var(--accent);transition:transform .6s var(--ease),background .6s}
@@ -202,7 +205,7 @@ dialog[open]{animation:pop .5s var(--ease)}
 .nav-row svg{width:18px;height:18px;stroke:var(--ink);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 
 /* Botão e painel de edição */
-.edit-fab{position:fixed;right:18px;bottom:18px;z-index:30;display:flex;align-items:center;gap:8px;height:48px;padding:0 20px 0 16px;border-radius:999px;border:0;background:var(--ink);color:#fff;font-size:14.5px;box-shadow:0 14px 30px -12px rgba(8,12,40,.5);transition:transform .3s var(--ease)}
+.edit-fab{position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom));z-index:30;display:flex;align-items:center;gap:8px;height:48px;padding:0 20px 0 16px;border-radius:999px;border:0;background:var(--ink);color:#fff;font-size:14.5px;box-shadow:0 14px 30px -12px rgba(8,12,40,.5);transition:transform .3s var(--ease)}
 .edit-fab:hover{transform:translateY(-2px)}
 .edit-fab svg{width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 #editor{max-width:min(96vw,620px);height:min(92vh,900px);margin-right:max(2vw,12px)}
@@ -299,10 +302,15 @@ legend{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transf
       <li><a class="link" href="#trabalhos">Trabalhos</a></li>
       <li><a class="link" href="#contato">Contato</a></li>
     </ul>
+    <div class="nav-right">
+    <button class="nav-edit" id="navEdit" type="button" hidden aria-label="Editar página">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M14 6l4 4"/></svg><span>Editar</span>
+    </button>
     <button class="swap" id="swap" type="button" aria-label="Trocar cor do site entre azul e verde">
       <span class="lbl" id="swapLbl">Cobalto</span>
       <span class="track" aria-hidden="true"><span class="knob"></span></span>
     </button>
+    </div>
   </nav>
 
   <header class="hero" id="perfil">
@@ -751,24 +759,42 @@ const idb = {
   async set(k, v) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction("kv", "readwrite"); t.objectStore("kv").put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); }
 };
 
+function showEdit() { backend.canEdit = true; $("#editFab").hidden = false; $("#navEdit").hidden = false; }
+async function waitForClaude(ms) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if (window.claude && typeof window.claude.use === "function") return window.claude;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return null;
+}
+const withTimeout = (p, ms) => Promise.race([Promise.resolve(p).catch(() => null), new Promise(r => setTimeout(() => r(null), ms))]);
+async function goLocal(showButton) {
+  backend.mode = "local";
+  try { const saved = await idb.get("data"); if (saved) { data = sanitize(saved); render(); } } catch {}
+  if (showButton) showEdit();
+}
 async function initBackend() {
-  const hasClaude = !!(window.claude && typeof window.claude.use === "function");
-  if (!hasClaude) {
-    const wantsEdit = location.hash === "#editar" || location.protocol === "file:";
-    try { const saved = await idb.get("data"); if (saved) { data = sanitize(saved); render(); } } catch {}
-    if (wantsEdit) { backend.mode = "local"; backend.canEdit = true; $("#editFab").hidden = false; }
+  const inFrame = (() => { try { return window.self !== window.top; } catch { return true; } })();
+  const claude = await waitForClaude(inFrame ? 6000 : 400);
+  if (!claude) {
+    const wants = () => location.hash === "#editar" || location.protocol === "file:";
+    await goLocal(wants());
+    addEventListener("hashchange", () => { if (wants() && !backend.canEdit) showEdit(); });
     return;
   }
-  const [db, user, assets, downloads] = await Promise.all(["db", "user", "assets", "downloads"].map(n => window.claude.use(n).catch(() => null)));
+  const [db, user, assets, downloads] = await Promise.all(["db", "user", "assets", "downloads"].map(n => withTimeout(claude.use(n), 10000)));
   backend.downloads = downloads; backend.assets = assets;
-  if (!db) return;
+  let allowed = true;
+  if (user) {
+    const [own, edit] = await Promise.all([withTimeout(user.isOwner(), 4000), withTimeout(user.canEdit(), 4000)]);
+    allowed = own === true || edit === true || (own == null && edit == null);
+  }
+  if (!db) { await goLocal(allowed); return; }
   backend.db = db; backend.mode = "cloud";
   backend.ref = db.doc("site/profile");
-  backend.ref.onSnapshot(snap => {
-    if (snap.exists) { data = sanitize(snap.data()); render(); }
-  }, () => {});
-  const canEdit = user ? await user.canEdit() : false;
-  if (canEdit) { backend.canEdit = true; $("#editFab").hidden = false; }
+  backend.ref.onSnapshot(snap => { if (snap.exists) { data = sanitize(snap.data()); render(); } }, () => {});
+  if (allowed) showEdit();
 }
 initBackend();
 
@@ -927,6 +953,7 @@ function askDiscard() {
   discardArmed = Date.now(); toast("Você tem mudanças não salvas. Toque de novo para descartar.", 3000); return false;
 }
 $("#editFab").addEventListener("click", openEditor);
+$("#navEdit").addEventListener("click", openEditor);
 $("#edClose").addEventListener("click", () => closeEditor());
 $("#edCancel").addEventListener("click", () => closeEditor());
 ed.addEventListener("cancel", e => { if (dirty && !askDiscard()) e.preventDefault(); });
